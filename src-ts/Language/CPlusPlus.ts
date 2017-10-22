@@ -16,7 +16,8 @@ import {
     removeNullFromUnion
 } from "../Type";
 import { Namespace, Name, DependencyName, Namer, funPrefixNamer } from "../Naming";
-import { Sourcelike } from "../Source";
+import { Sourcelike, annotated } from "../Source";
+import { anyTypeIssueAnnotation, nullTypeIssueAnnotation } from "../Annotation";
 import {
     legalizeCharacters,
     camelCase,
@@ -39,7 +40,7 @@ export default class CPlusPlusTargetLanguage extends TypeScriptTargetLanguage {
     }
 }
 
-const namingFunction = funPrefixNamer(false);
+const namingFunction = funPrefixNamer(cppNameStyle);
 
 const legalizeName = legalizeCharacters(isLetterOrUnderscoreOrDigit);
 
@@ -54,12 +55,12 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
         return cppNameStyle(rawName);
     }
 
-    protected namedTypeNameStyle(rawName: string): string {
-        return cppNameStyle(rawName);
+    protected get namedTypeNamer(): Namer {
+        return namingFunction;
     }
 
-    protected propertyNameStyle(rawName: string): string {
-        return cppNameStyle(rawName);
+    protected get propertyNamer(): Namer {
+        return namingFunction;
     }
 
     protected namedTypeToNameForTopLevel(type: Type): NamedType | null {
@@ -70,28 +71,42 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
         return null;
     }
 
-    protected get namedTypeNamer(): Namer {
-        return namingFunction;
-    }
-
-    protected get propertyNamer(): Namer {
-        return namingFunction;
-    }
-
-    private emitBlock = (line: Sourcelike, f: () => void): void => {
+    private emitBlock = (line: Sourcelike, withSemicolon: boolean, f: () => void): void => {
         this.emitLine(line, " {");
         this.indent(f);
-        this.emitLine("}");
+        if (withSemicolon) {
+            this.emitLine("};");
+        } else {
+            this.emitLine("}");
+        }
     };
+
+    private cppType: (t: Type) => Sourcelike = matchTypeAll<Sourcelike>(
+        anyType => annotated(anyTypeIssueAnnotation, "json"),
+        nullType => annotated(nullTypeIssueAnnotation, "json"),
+        boolType => "bool",
+        integerType => "int64_t",
+        doubleType => "double",
+        stringType => "std::string",
+        arrayType => ["std::vector<", this.cppType(arrayType.items), ">"],
+        classType => this.nameForNamedType(classType),
+        mapType => ["std::map<std::string, ", this.cppType(mapType.values), ">"],
+        unionType => {
+            const nullable = nullableFromUnion(unionType);
+            if (!nullable) return "FIXME";
+            return ["std::unique_ptr<", this.cppType(nullable), ">"];
+        }
+    );
 
     private emitClass = (
         c: ClassType,
         className: Name,
         propertyNames: OrderedMap<string, Name>
     ): void => {
-        this.emitBlock(["struct ", className], () => {
+        this.emitBlock(["struct ", className], true, () => {
             propertyNames.forEach((name: Name, json: string) => {
-                this.emitLine(name, " // ", json);
+                const propertyType = c.properties.get(json);
+                this.emitLine(this.cppType(propertyType), " ", name, ";");
             });
         });
     };

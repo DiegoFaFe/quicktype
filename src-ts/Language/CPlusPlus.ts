@@ -16,7 +16,7 @@ import {
     removeNullFromUnion
 } from "../Type";
 import { Namespace, Name, DependencyName, Namer, funPrefixNamer } from "../Naming";
-import { Sourcelike, annotated } from "../Source";
+import { Sourcelike, maybeAnnotated } from "../Source";
 import { anyTypeIssueAnnotation, nullTypeIssueAnnotation } from "../Annotation";
 import {
     legalizeCharacters,
@@ -81,9 +81,10 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
         }
     };
 
+    // FIXME: support omitting annotations
     private cppType: (t: Type) => Sourcelike = matchTypeAll<Sourcelike>(
-        anyType => annotated(anyTypeIssueAnnotation, "json"),
-        nullType => annotated(nullTypeIssueAnnotation, "json"),
+        anyType => maybeAnnotated(true, anyTypeIssueAnnotation, "json"),
+        nullType => maybeAnnotated(true, nullTypeIssueAnnotation, "json"),
         boolType => "bool",
         integerType => "int64_t",
         doubleType => "double",
@@ -94,7 +95,7 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
         unionType => {
             const nullable = nullableFromUnion(unionType);
             if (!nullable) return "FIXME";
-            return ["std::unique_ptr<", this.cppType(nullable), ">"];
+            return ["boost::optional<", this.cppType(nullable), ">"];
         }
     );
 
@@ -111,8 +112,41 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
         });
     };
 
+    private emitClassFunctions = (
+        c: ClassType,
+        className: Name,
+        propertyNames: OrderedMap<string, Name>
+    ): void => {
+        this.emitBlock(["void from_json(const json& j, ", className, "& x)"], false, () => {
+            propertyNames.forEach((name: Name, json: string) => {
+                const cppType = this.cppType(c.properties.get(json));
+                this.emitLine(
+                    "x.",
+                    name,
+                    ' = j.at("',
+                    stringEscape(json),
+                    '").get<',
+                    cppType,
+                    ">();"
+                );
+            });
+        });
+        this.emitNewline();
+        this.emitBlock(["void to_json(json& j, const ", className, "& x)"], false, () => {
+            const args: Sourcelike = [];
+            propertyNames.forEach((name: Name, json: string) => {
+                if (args.length !== 0) {
+                    args.push(", ");
+                }
+                args.push('{"', json, '", x.', name, "}");
+            });
+            this.emitLine("j = json{", args, "};");
+        });
+    };
+
     protected emitSourceStructure(): void {
         this.emitLine('#include "json.hpp"');
         this.forEachClass("leading-and-interposing", this.emitClass);
+        this.forEachClass("leading-and-interposing", this.emitClassFunctions);
     }
 }

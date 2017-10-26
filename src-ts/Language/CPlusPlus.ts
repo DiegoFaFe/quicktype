@@ -155,7 +155,7 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
         });
     };
 
-    private variantType = (u: UnionType): Sourcelike => {
+    private variantType = (u: UnionType, noOptional: boolean = false): Sourcelike => {
         const [hasNull, nonNulls] = removeNullFromUnion(u);
         const typeList: Sourcelike = [];
         nonNulls.forEach((t: Type) => {
@@ -165,7 +165,7 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
             typeList.push(this.cppType(t));
         });
         const variant: Sourcelike = ["boost::variant<", typeList, ">"];
-        if (!hasNull) {
+        if (!hasNull || noOptional) {
             return variant;
         }
         return ["boost::optional<", variant, ">"];
@@ -175,11 +175,71 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
         this.emitLine("typedef ", this.variantType(u), " ", unionName, ";");
     };
 
+    private emitUnionFunctions = (u: UnionType, unionName: Name): void => {
+        const functionForKind: [string, string][] = [
+            ["bool", "is_boolean"],
+            ["integer", "is_number_integer"],
+            ["double", "is_number"],
+            ["string", "is_string"],
+            ["class", "is_object"],
+            ["map", "is_object"],
+            ["array", "is_array"]
+        ];
+        const [_, nonNulls] = removeNullFromUnion(u);
+        const variantType = this.variantType(u, true);
+        this.emitBlock(["void from_json(const json& j, ", variantType, "& x)"], false, () => {
+            let onFirst = true;
+            for (const [kind, func] of functionForKind) {
+                const t = u.members.find((t: Type) => t.kind === kind);
+                if (t === undefined) continue;
+                this.emitLine(onFirst ? "if" : "else if", " (j.", func, "())");
+                this.indent(() => {
+                    this.emitLine("x = j.get<", this.cppType(t), ">();");
+                });
+                onFirst = false;
+            }
+            this.emitLine('else throw "Could not deserialize";');
+        });
+        /*
+    void to_json(json& j, const intOrString& x) {
+        switch (x.which()) {
+            case 0:
+                j = boost::get<int64_t>(x);
+                break;
+            case 1:
+                j = boost::get<std::string>(x);
+                break;
+            default:
+                throw "This should not happen";
+        }
+    }
+*/
+        this.emitNewline();
+        this.emitBlock(["void to_json(json& j, const ", variantType, "& x)"], false, () => {
+            this.emitBlock("switch (x.which())", false, () => {
+                let i = 0;
+                nonNulls.forEach((t: Type) => {
+                    this.emitLine("case ", i.toString(), ":");
+                    this.indent(() => {
+                        this.emitLine("j = boost::get<", this.cppType(t), ">(x);");
+                        this.emitLine("break;");
+                    });
+                    i++;
+                });
+                this.emitLine('default: throw "This should not happen";');
+            });
+        });
+    };
+
     protected emitSourceStructure(): void {
         this.emitLine('#include "json.hpp"');
         this.forEachClass("leading", this.emitClassForward);
         this.forEachUnion("leading", this.emitUnionTypedefs);
         this.forEachClass("leading-and-interposing", this.emitClass);
         this.forEachClass("leading-and-interposing", this.emitClassFunctions);
+        this.emitNewline();
+        this.emitBlock(["namespace nlohmann"], false, () => {
+            this.forEachUnion("interposing", this.emitUnionFunctions);
+        });
     }
 }

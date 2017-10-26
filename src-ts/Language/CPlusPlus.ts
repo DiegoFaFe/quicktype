@@ -12,7 +12,7 @@ import {
     UnionType,
     allClassesAndUnions,
     nullableFromUnion,
-    matchTypeAll,
+    matchType,
     removeNullFromUnion
 } from "../Type";
 import { Namespace, Name, DependencyName, Namer, funPrefixNamer } from "../Naming";
@@ -82,22 +82,33 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
     };
 
     // FIXME: support omitting annotations
-    private cppType: (t: Type) => Sourcelike = matchTypeAll<Sourcelike>(
-        anyType => maybeAnnotated(true, anyTypeIssueAnnotation, "json"),
-        nullType => maybeAnnotated(true, nullTypeIssueAnnotation, "json"),
-        boolType => "bool",
-        integerType => "int64_t",
-        doubleType => "double",
-        stringType => "std::string",
-        arrayType => ["std::vector<", this.cppType(arrayType.items), ">"],
-        classType => this.nameForNamedType(classType),
-        mapType => ["std::map<std::string, ", this.cppType(mapType.values), ">"],
-        unionType => {
-            const nullable = nullableFromUnion(unionType);
-            if (!nullable) return "FIXME";
-            return ["boost::optional<", this.cppType(nullable), ">"];
-        }
-    );
+    private cppType = (t: Type, withIssues: boolean = false): Sourcelike => {
+        return matchType<Sourcelike>(
+            t,
+            anyType => maybeAnnotated(withIssues, anyTypeIssueAnnotation, "json"),
+            nullType => maybeAnnotated(withIssues, nullTypeIssueAnnotation, "json"),
+            boolType => "bool",
+            integerType => "int64_t",
+            doubleType => "double",
+            stringType => "std::string",
+            arrayType => ["std::vector<", this.cppType(arrayType.items, withIssues), ">"],
+            classType => this.nameForNamedType(classType),
+            mapType => ["std::map<std::string, ", this.cppType(mapType.values, withIssues), ">"],
+            unionType => {
+                const nullable = nullableFromUnion(unionType);
+                if (!nullable) return this.nameForNamedType(unionType);
+                return ["boost::optional<", this.cppType(nullable, withIssues), ">"];
+            }
+        );
+    };
+
+    private emitClassForward = (
+        c: ClassType,
+        className: Name,
+        propertyNames: OrderedMap<string, Name>
+    ): void => {
+        this.emitLine(["struct ", className, ";"]);
+    };
 
     private emitClass = (
         c: ClassType,
@@ -107,7 +118,7 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
         this.emitBlock(["struct ", className], true, () => {
             propertyNames.forEach((name: Name, json: string) => {
                 const propertyType = c.properties.get(json);
-                this.emitLine(this.cppType(propertyType), " ", name, ";");
+                this.emitLine(this.cppType(propertyType, true), " ", name, ";");
             });
         });
     };
@@ -144,8 +155,30 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
         });
     };
 
+    private variantType = (u: UnionType): Sourcelike => {
+        const [hasNull, nonNulls] = removeNullFromUnion(u);
+        const typeList: Sourcelike = [];
+        nonNulls.forEach((t: Type) => {
+            if (typeList.length !== 0) {
+                typeList.push(", ");
+            }
+            typeList.push(this.cppType(t));
+        });
+        const variant: Sourcelike = ["boost::variant<", typeList, ">"];
+        if (!hasNull) {
+            return variant;
+        }
+        return ["boost::optional<", variant, ">"];
+    };
+
+    private emitUnionTypedefs = (u: UnionType, unionName: Name): void => {
+        this.emitLine("typedef ", this.variantType(u), " ", unionName, ";");
+    };
+
     protected emitSourceStructure(): void {
         this.emitLine('#include "json.hpp"');
+        this.forEachClass("leading", this.emitClassForward);
+        this.forEachUnion("leading", this.emitUnionTypedefs);
         this.forEachClass("leading-and-interposing", this.emitClass);
         this.forEachClass("leading-and-interposing", this.emitClassFunctions);
     }

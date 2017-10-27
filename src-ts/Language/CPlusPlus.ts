@@ -1,6 +1,6 @@
 "use strict";
 
-import { Map, OrderedMap } from "immutable";
+import { Map, OrderedMap, OrderedSet } from "immutable";
 
 import { TypeScriptTargetLanguage } from "../TargetLanguage";
 import {
@@ -50,7 +50,120 @@ function cppNameStyle(original: string): string {
     return startWithLetter(isLetterOrUnderscore, false, cameled);
 }
 
+const keywords = [
+    "alignas",
+    "alignof",
+    "and",
+    "and_eq",
+    "asm",
+    "atomic_cancel",
+    "atomic_commit",
+    "atomic_noexcept",
+    "auto",
+    "bitand",
+    "bitor",
+    "bool",
+    "break",
+    "case",
+    "catch",
+    "char",
+    "char16_t",
+    "char32_t",
+    "class",
+    "compl",
+    "concept",
+    "const",
+    "constexpr",
+    "const_cast",
+    "continue",
+    "co_await",
+    "co_return",
+    "co_yield",
+    "decltype",
+    "default",
+    "delete",
+    "do",
+    "double",
+    "dynamic_cast",
+    "else",
+    "enum",
+    "explicit",
+    "export",
+    "extern",
+    "false",
+    "float",
+    "for",
+    "friend",
+    "goto",
+    "if",
+    "import",
+    "inline",
+    "int",
+    "long",
+    "module",
+    "mutable",
+    "namespace",
+    "new",
+    "noexcept",
+    "not",
+    "not_eq",
+    "nullptr",
+    "operator",
+    "or",
+    "or_eq",
+    "private",
+    "protected",
+    "public",
+    "register",
+    "reinterpret_cast",
+    "requires",
+    "return",
+    "short",
+    "signed",
+    "sizeof",
+    "static",
+    "static_assert",
+    "static_cast",
+    "struct",
+    "switch",
+    "synchronized",
+    "template",
+    "this",
+    "thread_local",
+    "throw",
+    "true",
+    "try",
+    "typedef",
+    "typeid",
+    "typename",
+    "union",
+    "unsigned",
+    "using",
+    "virtual",
+    "void",
+    "volatile",
+    "wchar_t",
+    "while",
+    "xor",
+    "xor_eq",
+    "override",
+    "final",
+    "transaction_safe",
+    "transaction_safe_dynamic"
+];
+
 class CPlusPlusRenderer extends ConvenienceRenderer {
+    protected get forbiddenNamesForGlobalNamespace(): string[] {
+        return keywords;
+    }
+
+    protected forbiddenForProperties(
+        c: ClassType,
+        classNamed: Name
+    ): { names: Name[]; namespaces: Namespace[] } {
+        return { names: [], namespaces: [this.globalNamespace] };
+    }
+
     protected topLevelNameStyle(rawName: string): string {
         return cppNameStyle(rawName);
     }
@@ -81,6 +194,31 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
         }
     };
 
+    private cppTypeInOptional = (nonNulls: OrderedSet<Type>): Sourcelike => {
+        if (nonNulls.size === 1) {
+            return this.cppType(nonNulls.first());
+        }
+        const typeList: Sourcelike = [];
+        nonNulls.forEach((t: Type) => {
+            if (typeList.length !== 0) {
+                typeList.push(", ");
+            }
+            // FIXME: Do we need annotations here?
+            typeList.push(this.cppType(t));
+        });
+        return ["boost::variant<", typeList, ">"];
+    };
+
+    private variantType = (u: UnionType, noOptional: boolean = false): Sourcelike => {
+        const [hasNull, nonNulls] = removeNullFromUnion(u);
+        if (nonNulls.size < 2) throw "Variant not needed for less than two types.";
+        const variant = this.cppTypeInOptional(nonNulls);
+        if (!hasNull || noOptional) {
+            return variant;
+        }
+        return ["boost::optional<", variant, ">"];
+    };
+
     // FIXME: support omitting annotations
     private cppType = (t: Type, withIssues: boolean = false): Sourcelike => {
         return matchType<Sourcelike>(
@@ -100,14 +238,6 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
                 return ["boost::optional<", this.cppType(nullable, withIssues), ">"];
             }
         );
-    };
-
-    private emitClassForward = (
-        c: ClassType,
-        className: Name,
-        propertyNames: OrderedMap<string, Name>
-    ): void => {
-        this.emitLine(["struct ", className, ";"]);
     };
 
     private emitClass = (
@@ -130,7 +260,23 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
     ): void => {
         this.emitBlock(["void from_json(const json& j, ", className, "& x)"], false, () => {
             propertyNames.forEach((name: Name, json: string) => {
-                const cppType = this.cppType(c.properties.get(json));
+                const t = c.properties.get(json);
+                if (t instanceof UnionType) {
+                    const [hasNull, nonNulls] = removeNullFromUnion(t);
+                    if (hasNull) {
+                        this.emitLine(
+                            "x.",
+                            name,
+                            " = get_optional<",
+                            this.cppTypeInOptional(nonNulls),
+                            '>(j, "',
+                            stringEscape(json),
+                            '");'
+                        );
+                        return;
+                    }
+                }
+                const cppType = this.cppType(t);
                 this.emitLine(
                     "x.",
                     name,
@@ -155,22 +301,6 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
         });
     };
 
-    private variantType = (u: UnionType, noOptional: boolean = false): Sourcelike => {
-        const [hasNull, nonNulls] = removeNullFromUnion(u);
-        const typeList: Sourcelike = [];
-        nonNulls.forEach((t: Type) => {
-            if (typeList.length !== 0) {
-                typeList.push(", ");
-            }
-            typeList.push(this.cppType(t));
-        });
-        const variant: Sourcelike = ["boost::variant<", typeList, ">"];
-        if (!hasNull || noOptional) {
-            return variant;
-        }
-        return ["boost::optional<", variant, ">"];
-    };
-
     private emitUnionTypedefs = (u: UnionType, unionName: Name): void => {
         this.emitLine("typedef ", this.variantType(u), " ", unionName, ";");
     };
@@ -186,6 +316,7 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
             ["array", "is_array"]
         ];
         const [_, nonNulls] = removeNullFromUnion(u);
+        // FIXME: Use cppTypeInOptional here.
         const variantType = this.variantType(u, true);
         this.emitBlock(["void from_json(const json& j, ", variantType, "& x)"], false, () => {
             let onFirst = true;
@@ -200,20 +331,6 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
             }
             this.emitLine('else throw "Could not deserialize";');
         });
-        /*
-    void to_json(json& j, const intOrString& x) {
-        switch (x.which()) {
-            case 0:
-                j = boost::get<int64_t>(x);
-                break;
-            case 1:
-                j = boost::get<std::string>(x);
-                break;
-            default:
-                throw "This should not happen";
-        }
-    }
-*/
         this.emitNewline();
         this.emitBlock(["void to_json(json& j, const ", variantType, "& x)"], false, () => {
             this.emitBlock("switch (x.which())", false, () => {
@@ -233,9 +350,12 @@ class CPlusPlusRenderer extends ConvenienceRenderer {
 
     protected emitSourceStructure(): void {
         this.emitLine('#include "json.hpp"');
-        this.forEachClass("leading", this.emitClassForward);
-        this.forEachUnion("leading", this.emitUnionTypedefs);
-        this.forEachClass("leading-and-interposing", this.emitClass);
+        this.forEachNamedType(
+            "leading-and-interposing",
+            true,
+            this.emitClass,
+            this.emitUnionTypedefs
+        );
         this.forEachClass("leading-and-interposing", this.emitClassFunctions);
         this.emitNewline();
         this.emitBlock(["namespace nlohmann"], false, () => {

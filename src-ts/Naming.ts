@@ -1,6 +1,6 @@
 "use strict";
 
-import { Set, OrderedSet, List, Map, Iterable, Range } from "immutable";
+import { Set, OrderedSet, List, Map, Collection, Range } from "immutable";
 import stringHash = require("string-hash");
 
 import { Renderer } from "./Renderer";
@@ -95,13 +95,13 @@ export class Namer {
     name(
         names: Map<Name, string>,
         forbiddenNames: Set<string>,
-        namesToAssign: Iterable<any, Name>
+        namesToAssign: Collection<any, Name>
     ): Map<Name, string> {
         if (namesToAssign.isEmpty()) {
             throw "Number of names can't be less than 1";
         }
 
-        if (namesToAssign.size === 1) {
+        if (namesToAssign.count() === 1) {
             const name = namesToAssign.first();
             const styledName = this.nameStyle(name.proposeUnstyledName(names));
             const assignedForSingle = name.nameAssignments(forbiddenNames, styledName);
@@ -112,7 +112,7 @@ export class Namer {
 
         let allAssignedNames = Map<Name, string>();
 
-        let prefixes = this._prefixes as Iterable<any, string>;
+        let prefixes = this._prefixes as Collection<any, string>;
         let suffixNumber = 1;
         while (!namesToAssign.isEmpty()) {
             const name = namesToAssign.first();
@@ -403,11 +403,11 @@ export function assignNames(rootNamespaces: OrderedSet<Namespace>): Map<Name, st
         // It would be nice if we had tuples, then we wouldn't have to do this in
         // two steps.
         const byNamingFunction = readyNames.groupBy((n: Name) => n.namingFunction);
-        byNamingFunction.forEach((namedsForNamingFunction: Iterable<any, Name>, namer: Namer) => {
+        byNamingFunction.forEach((namedsForNamingFunction: Collection<any, Name>, namer: Namer) => {
             const byProposed = namedsForNamingFunction.groupBy((n: Name) =>
                 namer.nameStyle(n.proposeUnstyledName(ctx.names))
             );
-            byProposed.forEach((nameds: Iterable<any, Name>, proposed: string) => {
+            byProposed.forEach((nameds: Collection<any, Name>, proposed: string) => {
                 // 3. Use each set's naming function to name its members.
 
                 const names = namer.name(ctx.names, forbiddenNames, nameds);
